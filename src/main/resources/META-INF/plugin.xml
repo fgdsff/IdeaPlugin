@@ -136,5 +136,11 @@
                 class="org.axonframework.intellij.ide.plugin.actions.ReportFeedbackAction">
             <add-to-group group-id="ToolsMenu" relative-to-action="GenerateJavadoc" anchor="after"/>
         </action>
+
+        <action id="ExportAxonMap" class="org.axonframework.intellij.ide.plugin.actions.ExportAxonMapAction"
+                text="Export Axon Map" description="Export all resolved Axon messages">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
     </actions>
 </idea-plugin>

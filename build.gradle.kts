@@ -149,6 +149,7 @@ dependencies {
     }
 
     implementation("io.sentry:sentry:6.32.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.axonframework:axon-modelling:${properties("axonVersion")}")

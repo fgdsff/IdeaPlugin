@@ -16,8 +16,14 @@
 
 package org.axonframework.intellij.ide.plugin.resolving
 
+import com.intellij.ide.highlighter.JavaFileType
 import com.intellij.openapi.project.Project
+import com.intellij.psi.JavaPsiFacade
+import com.intellij.psi.JavaRecursiveElementWalkingVisitor
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiMethod
+import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.util.CachedValue
@@ -26,7 +32,6 @@ import org.axonframework.intellij.ide.plugin.resolving.creators.DefaultMessageCr
 import org.axonframework.intellij.ide.plugin.util.axonScope
 import org.axonframework.intellij.ide.plugin.util.createCachedValue
 import org.axonframework.intellij.ide.plugin.util.findParentHandlers
-import org.axonframework.intellij.ide.plugin.util.handlerResolver
 import org.axonframework.intellij.ide.plugin.util.javaFacade
 import java.util.concurrent.ConcurrentHashMap
 
@@ -41,7 +46,7 @@ class MessageCreationResolver(private val project: Project) {
     private val psiFacade = project.javaFacade()
     private val constructorsByPayloadCache = ConcurrentHashMap<String, CachedValue<List<MessageCreator>>>()
 
-    /**
+        /**
      * Retrieves all MessageCreator instances for a given payload. Will cache results, so don't worry about
      * calling it multiple times.
      *
@@ -58,19 +63,52 @@ class MessageCreationResolver(private val project: Project) {
     }
 
     private fun findByPayload(payload: String): List<MessageCreator> {
-        val classes = psiFacade.findClass(payload, project.axonScope())?.let { clazz ->
-            listOf(clazz) + ClassInheritorsSearch.search(clazz, project.axonScope(), true)
-        } ?: return emptyList()
+        val scope = project.axonScope()
+        val psiFacade = JavaPsiFacade.getInstance(project)
 
-        return classes
-            .flatMap { clazz ->
-                // Account for constructors and builder methods (builder(), toBuilder(), etc)
-                val methods = clazz.constructors + clazz.methods.filter { it.name.contains("build", ignoreCase = true) }
+        val clazz = psiFacade.findClass(payload, scope) ?: return emptyList()
+        val classes = listOf(clazz) + ClassInheritorsSearch.search(clazz, scope, true)
+
+        val referenceCreators = classes
+            .flatMap { cls ->
+                val methods = cls.constructors + cls.methods.filter { it.name.contains("build", ignoreCase = true) }
                 methods
-                    .flatMap { MethodReferencesSearch.search(it, project.axonScope(), true) }
+                    .flatMap { MethodReferencesSearch.search(it, scope, true) }
                     .flatMap { ref -> createCreators(clazz.qualifiedName!!, ref.element) }
-                    .distinct()
             }
+
+        // Additional: detect usage as parameters of Spring boot endpoints
+        val springParamCreators = mutableListOf<MessageCreator>()
+
+        FileTypeIndex.getFiles(JavaFileType.INSTANCE, scope).forEach { virtualFile ->
+            if (!virtualFile.name.endsWith(".java")) return@forEach
+
+            val fileText = virtualFile.contentsToByteArray().toString(Charsets.UTF_8)
+            if (!clazz.name?.let { fileText.contains(it) }!!) return@forEach  // 💡 cheap string match
+
+            val psiFile = PsiManager.getInstance(project).findFile(virtualFile) ?: return@forEach
+
+            psiFile.accept(object : JavaRecursiveElementWalkingVisitor() {
+                override fun visitMethod(method: PsiMethod) {
+                    method.parameterList.parameters.forEach { param ->
+                        val type = param.type.canonicalText
+                        if (type == payload || psiFacade.findClass(type, scope)?.isInheritor(clazz, true) == true) {
+                            val hasSpringWebAnnotation = method.annotations.any {
+                                val name = it.qualifiedName ?: return@any false
+                                name.endsWith("GetMapping") || name.endsWith("PostMapping") || name.endsWith("PutMapping") ||
+                                        name.endsWith("DeleteMapping") || name.endsWith("PatchMapping") || name.endsWith("RequestMapping")
+                            }
+                            if (hasSpringWebAnnotation) {
+                                springParamCreators += createCreators(payload, param)
+                            }
+                        }
+                    }
+                }
+            })
+        }
+
+
+        return (referenceCreators + springParamCreators).distinct()
     }
 
     private fun createCreators(payload: String, element: PsiElement): List<MessageCreator> {
